@@ -255,6 +255,7 @@ local Farmer = {
     HarvestMs = 250,    -- jeda setelah tiap panen
     PlantMs = 250,      -- jeda setelah tiap tanam
     SeedId = nil,
+    Only = nil,         -- bila terisi, panen hanya pohon dengan seed ini
     Skip = {},
     Harvested = 0,
     Planted = 0,
@@ -1564,14 +1565,17 @@ local function doInvRefresh(force)
         selectSaved(UI.InvDropdown, labels, State.SelectedId)
     end
     local pids, pLabels = {}, {}
-    for _, id in ipairs(ids) do
-        local it = ItemDB[id]
-        if it and it.platform then
+    for rawId, it in pairs(ItemDB) do
+        local id = tonumber(rawId)
+        if id and it and it.platform then
             pids[#pids + 1] = id
-            pLabels[#pLabels + 1] = string.format("%s [%d]", itemName(id), id)
         end
     end
-    local psig = table.concat(pids, ",")
+    table.sort(pids)
+    for _, id in ipairs(pids) do
+        pLabels[#pLabels + 1] = string.format("%s (x%d) [%d]", itemName(id), invCount(id), id)
+    end
+    local psig = table.concat(pLabels, ",")
     if force or psig ~= lastPlatformSig then
         lastPlatformSig = psig
         if #pLabels == 0 then pLabels = { "(tidak ada platform di inventori)" } end
@@ -4651,6 +4655,7 @@ local function farmerCfg()
         harvest = Farmer.Harvest,
         plant = Farmer.Plant,
         seed = Farmer.SeedId,
+        only = Farmer.Only,
         skip = Farmer.Skip,
         hms = Farmer.HarvestMs,
         pms = Farmer.PlantMs,
@@ -7639,6 +7644,141 @@ Auto.ClearFail = ClearFail
 
 -- ---------- Auto Platform ----------
 -- Pakai baris dan tangga zig-zag yang sama dengan geometri lahan, tanpa menggali tanah.
+local function findSeedByName(name)
+    local wanted = string.lower(name)
+    for rawId, item in pairs(ItemDB) do
+        local id = tonumber(rawId)
+        if id and item and item.kind == "seed" and type(item.name) == "string"
+            and string.lower(item.name) == wanted then
+            return id
+        end
+    end
+end
+
+local function platformRecipe()
+    local woodSeed = findSeedByName("Wood Block Seed")
+    local grassSeed = findSeedByName("Grass Seed")
+    if not woodSeed or not grassSeed then return nil, "Data Wood Block Seed / Grass Seed tidak ditemukan" end
+    local resultSeed = Splice.result(woodSeed, grassSeed)
+    local resultBlock = resultSeed and blockOfSeed(resultSeed)
+    local resultItem = resultBlock and ItemDB[resultBlock]
+    if not (resultSeed and resultItem and resultItem.platform) then
+        return nil, "Resep Wood Block + Grass tidak menghasilkan seed platform di data game ini"
+    end
+    return { a = woodSeed, b = grassSeed, tree = resultSeed, block = resultBlock }
+end
+
+local function countPlatformTrees(seedId)
+    local w = Refs.World
+    if not w or not w.fg then return 0 end
+    local n = 0
+    for y = 0, w.h - 1 do
+        local row = w.fg[y]
+        if row then
+            for x = 0, w.w - 1 do
+                if row[x] == seedId then n += 1 end
+            end
+        end
+    end
+    return n
+end
+
+local function acquirePlatforms(required, runId)
+    local function live()
+        return Platform.Running and alive() and Platform.RunId == runId
+    end
+    if invCount(Platform.ItemId) >= required then return true end
+    local recipe, why = platformRecipe()
+    if not recipe then return false, why end
+    if invCount(recipe.a) <= 0 or invCount(recipe.b) <= 0 then
+        return false, ("Stok kurang; butuh %s dan %s untuk membuatnya"):format(
+            itemName(recipe.a), itemName(recipe.b))
+    end
+
+    local old = {
+        spliceA = Splice.A, spliceB = Splice.B, spliceRoam = Splice.Roam,
+        farmerSeed = Farmer.SeedId, farmerOnly = Farmer.Only,
+        farmerHarvest = Farmer.Harvest, farmerPlant = Farmer.Plant, farmerCollect = Farmer.Collect,
+    }
+    local function restore()
+        if Splice.Running and Splice.stop then Splice.stop("Auto Platform ganti fase") end
+        if Farmer.Running then stopFarmer("Auto Platform ganti fase") end
+        Splice.A, Splice.B, Splice.Roam = old.spliceA, old.spliceB, old.spliceRoam
+        Farmer.SeedId, Farmer.Only = old.farmerSeed, old.farmerOnly
+        Farmer.Harvest, Farmer.Plant, Farmer.Collect = old.farmerHarvest, old.farmerPlant, old.farmerCollect
+    end
+
+    Splice.A, Splice.B, Splice.Roam = recipe.a, recipe.b, true
+    Platform.Status = ("Membuat seed %s dari %s + %s"):format(
+        itemName(recipe.tree), itemName(recipe.a), itemName(recipe.b))
+    local lastProgress = invCount(Platform.ItemId)
+    local cycles = 0
+    while live() and invCount(Platform.ItemId) < required do
+        cycles += 1
+        if cycles > 40 then
+            restore()
+            return false, "Dihentikan: batas siklus produksi tercapai"
+        end
+        if invCount(recipe.a) <= 0 or invCount(recipe.b) <= 0 then break end
+
+        if not Splice.Running then Splice.start() end
+        if not Splice.Running then
+            restore()
+            return false, "Auto Splice tidak bisa dimulai; cek world dan data game"
+        end
+        while live() and Splice.Running do
+            local status = Splice.Status or ""
+            if string.find(status, "Menunggu: tidak ada tempat tanam", 1, true)
+                or string.find(status, "Seed A habis, tidak ada pohon A", 1, true)
+                or invCount(recipe.b) <= 0 then
+                Splice.stop("Batch splice selesai")
+                break
+            end
+            task.wait(0.25)
+        end
+        if not live() then break end
+        local treeCount = countPlatformTrees(recipe.tree)
+        if treeCount > 0 then
+            Farmer.SeedId, Farmer.Only = recipe.tree, recipe.tree
+            Farmer.Harvest, Farmer.Plant, Farmer.Collect = true, false, true
+            table.clear(Farmer.Skip)
+            Platform.Status = ("Memanen %d pohon %s"):format(treeCount, itemName(recipe.tree))
+            Auto.startFarmer()
+            if not Farmer.Running then
+                restore()
+                return false, "Auto Farmer tidak bisa dimulai untuk memanen hasil splice"
+            end
+            while live() and Farmer.Running do
+                if invCount(Platform.ItemId) >= required then
+                    stopFarmer("Target platform tercapai")
+                    break
+                end
+                if countPlatformTrees(recipe.tree) == 0 then
+                    stopFarmer("Batch panen selesai")
+                    break
+                end
+                task.wait(0.5)
+            end
+            if Farmer.Running then stopFarmer("Batch panen selesai") end
+        end
+
+        local now = invCount(Platform.ItemId)
+        if now <= lastProgress and invCount(recipe.a) <= 0 then break end
+        lastProgress = now
+        if now < required and (invCount(recipe.a) <= 0 or invCount(recipe.b) <= 0)
+            and countPlatformTrees(recipe.tree) == 0 then
+            break
+        end
+    end
+    restore()
+    if not live() then return false, "Proses produksi dihentikan" end
+    if invCount(Platform.ItemId) < required then
+        return false, ("Platform terkumpul %d/%d; seed bahan habis atau tidak cukup"):format(
+            invCount(Platform.ItemId), required)
+    end
+    return true
+end
+
 local function platformPlan()
     local w = Refs.World
     if not w then return nil, "Data world belum ketemu" end
@@ -7694,6 +7834,20 @@ local function platformLoop(runId)
     Platform.Total, Platform.Done, Platform.Blocked = plan.total, plan.done, plan.blocked
     if plan.blocked > 0 then
         Platform.stop(("Berhenti: %d tile terhalang / tidak bisa dibangun; kosongkan area dulu"):format(plan.blocked))
+        return
+    end
+    if plan.need > 0 and invCount(Platform.ItemId) < plan.need then
+        local enough, getErr = acquirePlatforms(plan.need, runId)
+        if not enough then
+            if live() then Platform.stop(getErr or "Platform belum cukup") end
+            return
+        end
+    end
+    plan, why = platformPlan()
+    if not plan then Platform.stop(why or "Gagal menghitung ulang platform") return end
+    Platform.Total, Platform.Done, Platform.Blocked = plan.total, plan.done, plan.blocked
+    if plan.blocked > 0 then
+        Platform.stop(("Berhenti: %d tile terhalang setelah produksi; kosongkan area dulu"):format(plan.blocked))
         return
     end
     Platform.Status = ("Rencana %d platform; butuh %d, punya %d"):format(
@@ -7770,9 +7924,7 @@ function Platform.start()
     elseif not playerState() then
         err = "Kamu belum masuk world"
     elseif not (it and it.platform) then
-        err = "Pilih item platform dari inventori"
-    elseif invCount(Platform.ItemId) <= 0 then
-        err = "Platform pilihan habis"
+        err = "Pilih item platform"
     end
     local plan, planErr = platformPlan()
     if not err and not plan then err = planErr end
@@ -10659,7 +10811,7 @@ do (function()
     safe(function()
         UI.PlatformDropdown = pCtl:Dropdown({
             Title = "Item platform",
-            Desc = "Pilih item bertipe platform dari inventori",
+            Desc = "Pilih item platform; stok kurang akan dicoba dibuat dari seed bahan",
             Values = { "(memuat...)" },
             Callback = function(opt)
                 local id = tonumber(string.match(opt or "", "%[(%d+)%]$"))
@@ -11912,7 +12064,8 @@ task.spawn(function()
                     or (itemKind == "platform" and item.platform)
                     or (itemKind == "block" and item.kind ~= "seed" and numericId and isPlaceable(numericId))
                 )
-                if numericId and itemNameLower == wanted and kindOk and invCount(numericId) > 0
+                if numericId and itemNameLower == wanted and kindOk
+                    and (itemKind == "platform" or invCount(numericId) > 0)
                     and (not found or numericId < found) then
                     found = numericId
                 end
