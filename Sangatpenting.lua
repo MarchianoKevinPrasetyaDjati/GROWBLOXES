@@ -1,7 +1,43 @@
 
 local G = (getgenv and getgenv()) or _G
--- Loader boleh mengisi boolean ini sebelum memuat script dari GitHub.
-local FeatureConfig = type(G.__KzoyzFeatureConfig) == "table" and G.__KzoyzFeatureConfig or nil
+-- Config loader boleh berbentuk lama (flat) atau v2 (kategori > fitur > opsi).
+local FeatureConfig, NestedFeatureConfig
+do (function()
+    local raw = type(G.__KzoyzFeatureConfig) == "table" and G.__KzoyzFeatureConfig or nil
+    if not raw then return end
+    if raw.SchemaVersion ~= 2 and type(raw.Farming) ~= "table" then
+        FeatureConfig = raw -- dukung loader lama
+        return
+    end
+    NestedFeatureConfig = raw
+    local function group(key) return type(raw[key]) == "table" and raw[key] or {} end
+    local farming, land = group("Farming"), group("Land")
+    local utilities, rewards = group("Utilities"), group("Rewards")
+    local function sub(parent, key)
+        return type(parent[key]) == "table" and parent[key] or {}
+    end
+    local autoFarm, farmer = sub(farming, "Auto Farm"), sub(farming, "Farmer")
+    local clear, splice = sub(farming, "Auto Clear"), sub(farming, "Auto Splice")
+    local factory = sub(farming, "Factory")
+    local platform, build = sub(land, "Auto Platform"), sub(land, "Build Land")
+    local economy, reconnect = group("Economy"), group("Reconnect")
+    local vend, chat, guard = sub(economy, "Vending"), sub(utilities, "Auto Chat"), sub(utilities, "Guard")
+    local quest, redeem = sub(rewards, "Auto Claim Quest"), sub(rewards, "Auto Redeem Code")
+    FeatureConfig = {
+        AutoFarm = autoFarm.Enabled == true, FarmBlock = autoFarm.Block or "Sugar Cane",
+        Farmer = farmer.Enabled == true, FarmSeed = farmer.Seed or "Sugar Cane",
+        AutoClear = clear.Enabled == true,
+        AutoSplice = splice.Enabled == true, SpliceSeedA = splice["Seed A"], SpliceSeedB = splice["Seed B"],
+        BuildLand = build.Enabled == true, BuildBlock = build.Block,
+        AutoPlatform = platform.Enabled == true, PlatformItem = platform.Item or "Wooden Platform",
+        Factory = factory.Enabled == true, FactorySeed = factory.Seed,
+        Vending = vend.Enabled == true,
+        AutoChat = chat.Enabled == true,
+        Guard = guard.Enabled == true,
+        AutoClaimQuest = quest.Enabled == true, AutoRedeemCode = redeem.Enabled == true,
+        Reconnect = reconnect.Enabled == true,
+    }
+end)() end
 for _, key in ipairs({ "__KzoyzOpus", "__GTFarm" }) do -- __GTFarm = nama versi lama
     if G[key] and G[key].Cleanup then pcall(G[key].Cleanup) end
     G[key] = nil
@@ -11769,6 +11805,84 @@ end)() end
 Config.add("Reconnect", Rejoin, { "On", "World", "Server", "DelaySec", "ScriptUrl", "Keep", "Target" })
 Config.add("Discord", Hook, { "On", "Url", "Penjaga", "Stop", "Full", "Bonus", "Rejoin", "Pabrik", "ReportMin" })
 
+-- Opsi bertingkat dari Loader.lua diterapkan setelah config tersimpan dimuat,
+-- sehingga loader menjadi konfigurasi startup yang eksplisit.
+if NestedFeatureConfig then
+    local function group(parent, key)
+        local value = type(parent) == "table" and parent[key]
+        return type(value) == "table" and value or {}
+    end
+    local function set(target, targetKey, source, sourceKey, expected)
+        local value = source[sourceKey]
+        if value ~= nil and (not expected or type(value) == expected) then
+            target[targetKey] = value
+        end
+    end
+    local farming = group(NestedFeatureConfig, "Farming")
+    local landConfig = group(NestedFeatureConfig, "Land")
+    local autoFarm, farmer = group(farming, "Auto Farm"), group(farming, "Farmer")
+    local clear, splice, factory = group(farming, "Auto Clear"), group(farming, "Auto Splice"), group(farming, "Factory")
+    local build, platform, shape = group(landConfig, "Build Land"), group(landConfig, "Auto Platform"), group(landConfig, "Shape")
+    local economy, utilities = group(NestedFeatureConfig, "Economy"), group(NestedFeatureConfig, "Utilities")
+    local vend, chat, guard = group(economy, "Vending"), group(utilities, "Auto Chat"), group(utilities, "Guard")
+    local rewards, reconnect = group(NestedFeatureConfig, "Rewards"), group(NestedFeatureConfig, "Reconnect")
+    local quest, redeem = group(rewards, "Auto Claim Quest"), group(rewards, "Auto Redeem Code")
+
+    set(State, "Mode", autoFarm, "Mode", "string")
+    set(State, "PlaceMs", autoFarm, "Place Delay (ms)", "number")
+    set(State, "BreakMs", autoFarm, "Break Delay (ms)", "number")
+    set(State, "AfterBreakMs", autoFarm, "After Break Delay (ms)", "number")
+    set(State, "AutoCollect", autoFarm, "Auto Collect", "boolean")
+    set(Farmer, "Harvest", farmer, "Auto Harvest", "boolean")
+    set(Farmer, "Plant", farmer, "Auto Plant", "boolean")
+    set(Farmer, "Collect", farmer, "Auto Collect", "boolean")
+    set(Farmer, "HarvestMs", farmer, "Harvest Delay (ms)", "number")
+    set(Farmer, "PlantMs", farmer, "Plant Delay (ms)", "number")
+    set(Clear, "IncludeBg", clear, "Include Background", "boolean")
+    set(Clear, "UseBlock", clear, "Use Block", "boolean")
+    set(Clear, "Collect", clear, "Collect", "boolean")
+    set(Clear, "Sweep", clear, "Sweep", "string")
+    set(Splice, "Roam", splice, "Roam", "boolean")
+    set(Splice, "Ms", splice, "Delay (ms)", "number")
+    set(Pabrik, "WholeWorld", factory, "Whole World", "boolean")
+    set(Pabrik, "Drop", factory, "Drop", "boolean")
+    set(Pabrik, "Keep", factory, "Keep", "number")
+    set(Pabrik, "DropAt", factory, "Drop At", "number")
+    set(Build, "Produce", build, "Produce", "boolean")
+    set(Build, "UseBlock", build, "Use Block", "boolean")
+    set(Build, "ThenPabrik", build, "Then Factory", "boolean")
+    set(Land, "X0", shape, "X0", "number")
+    set(Land, "X1", shape, "X1", "number")
+    set(Land, "Y0", shape, "Y0", "number")
+    set(Land, "Gap", shape, "Gap", "number")
+    set(Land, "Rows", shape, "Rows", "number")
+    set(Vend, "Mode", vend, "Mode", "string")
+    set(Vend, "Point", vend, "Point", "string")
+    set(Spam, "Texts", chat, "Messages", "table")
+    set(Spam, "IntervalSec", chat, "Interval (sec)", "number")
+    set(Guard, "Who", guard, "Who", "string")
+    set(Guard, "StopAll", guard, "Stop All", "boolean")
+    set(Guard, "Leave", guard, "Leave", "boolean")
+    set(Guard, "AutoBack", guard, "Auto Back", "boolean")
+    set(Guard, "BackSec", guard, "Back Delay (sec)", "number")
+    set(Guard, "CalmSec", guard, "Calm Delay (sec)", "number")
+    set(Bonus, "Quest", quest, "Enabled", "boolean")
+    set(Bonus, "Redeem", redeem, "Enabled", "boolean")
+    set(Rejoin, "On", reconnect, "Enabled", "boolean")
+    set(Rejoin, "World", reconnect, "World", "boolean")
+    set(Rejoin, "Server", reconnect, "Server", "boolean")
+    set(Rejoin, "DelaySec", reconnect, "Delay (sec)", "number")
+    set(Rejoin, "Keep", reconnect, "Keep returning", "boolean")
+    set(Rejoin, "Target", reconnect, "Target", "string")
+    set(Rejoin, "ScriptUrl", reconnect, "Script URL", "string")
+
+    State.PlaceMs = math.max(State.PlaceMs, 140)
+    State.BreakMs = math.max(State.BreakMs, 200)
+    Farmer.HarvestMs = math.max(Farmer.HarvestMs, 140)
+    Farmer.PlantMs = math.max(Farmer.PlantMs, 140)
+    Splice.Ms = math.max(Splice.Ms, 140)
+end
+
 -- ===== TAB: TITIK DROP (dipakai Pabrik, Farmer, Auto Farm) =====
 do (function()
     local DTab = makeTab("Titik Drop", "map-pin", "farm")
@@ -11983,7 +12097,7 @@ do (function()
     end)
 
     safe(function()
-        rBox:Toggle({
+        UI.RejoinToggle = rBox:Toggle({
             Title = "Auto Reconnect",
             Desc = "Masuk lagi & lanjut aktivitas kalau terlempar",
             Value = Rejoin.On,
@@ -12213,6 +12327,30 @@ task.spawn(function()
                 warn("[Kzoyz x Opus] AutoPlatform dimatikan: PlatformItem tidak ditemukan sebagai platform di inventori.")
             end
         end
+        if FeatureConfig.AutoSplice == true then
+            Splice.A = resolveStartupItem(FeatureConfig.SpliceSeedA, "seed")
+            Splice.B = resolveStartupItem(FeatureConfig.SpliceSeedB, "seed")
+            if not Splice.A or not Splice.B then
+                FeatureConfig.AutoSplice = false
+                warn("[Kzoyz x Opus] AutoSplice dimatikan: isi Seed A dan Seed B dengan seed yang ada di inventori.")
+            end
+        end
+        if FeatureConfig.BuildLand == true then
+            Build.BlockId = type(FeatureConfig.BuildBlock) == "string" and FeatureConfig.BuildBlock ~= ""
+                and resolveStartupItem(FeatureConfig.BuildBlock, "block") or nil
+            if not Build.BlockId then
+                FeatureConfig.BuildLand = false
+                warn("[Kzoyz x Opus] BuildLand dimatikan: isi Build Land.Block dengan block yang tersedia di inventori.")
+            end
+        end
+        if FeatureConfig.Factory == true then
+            Pabrik.SeedId = type(FeatureConfig.FactorySeed) == "string" and FeatureConfig.FactorySeed ~= ""
+                and resolveStartupItem(FeatureConfig.FactorySeed, "seed") or nil
+            if not Pabrik.SeedId then
+                FeatureConfig.Factory = false
+                warn("[Kzoyz x Opus] Factory dimatikan: isi Factory.Seed dengan seed yang tersedia di inventori.")
+            end
+        end
         pcall(doInvRefresh, true)
 
         local toggles = {
@@ -12228,6 +12366,7 @@ task.spawn(function()
             { "Guard", UI.GuardToggle },
             { "AutoClaimQuest", UI.QuestToggle },
             { "AutoRedeemCode", UI.RedeemToggle },
+            { "Reconnect", UI.RejoinToggle },
         }
         for _, entry in ipairs(toggles) do
             if FeatureConfig[entry[1]] == true and entry[2] then
