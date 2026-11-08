@@ -1,5 +1,7 @@
 
 local G = (getgenv and getgenv()) or _G
+-- Loader boleh mengisi boolean ini sebelum memuat script dari GitHub.
+local FeatureConfig = type(G.__KzoyzFeatureConfig) == "table" and G.__KzoyzFeatureConfig or nil
 for _, key in ipairs({ "__KzoyzOpus", "__GTFarm" }) do -- __GTFarm = nama versi lama
     if G[key] and G[key].Cleanup then pcall(G[key].Cleanup) end
     G[key] = nil
@@ -9439,7 +9441,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
     end)
 
     safe(function()
-        bQuest:Toggle({
+        UI.QuestToggle = bQuest:Toggle({
             Title = "Auto Claim Quest",
             Desc = "Klaim hadiah quest yang sudah selesai",
             Value = Bonus.Quest,
@@ -9462,7 +9464,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
     end)
 
     safe(function()
-        bCode:Toggle({
+        UI.RedeemToggle = bCode:Toggle({
             Title = "Auto Redeem Code",
             Desc = "Tukar semua code aktif yang belum dipakai",
             Value = Bonus.Redeem,
@@ -11605,11 +11607,80 @@ task.spawn(function()
     reconnect("Kzoyz x Opus v5.2")
     -- Penjaga dari config dinyalakan setelah data pemain ketemu
     -- (supaya pemain yang sudah ada dicatat dulu)
-    if Config.saved("Penjaga", "On") == true and alive() then
+    if not FeatureConfig and Config.saved("Penjaga", "On") == true and alive() then
         if UI.GuardToggle then pcall(function() UI.GuardToggle:Set(true) end) end
         if not Guard.On then Guard.set(true) end
     end
     Config.start()
+    -- Aktifkan hanya fitur yang disetel true oleh loader.
+    -- Aktivitas utama saling menghentikan; nyalakan maksimal satu aktivitas utama.
+    if FeatureConfig and alive() then
+        local function resolveStartupItem(name, wantSeed)
+            if type(name) ~= "string" then return nil end
+            local wanted = string.lower((name:gsub("^%s+", ""):gsub("%s+$", "")))
+            if wanted == "" then return nil end
+            local found
+            for id, item in pairs(ItemDB) do
+                local numericId = tonumber(id)
+                local itemNameLower = type(item) == "table" and type(item.name) == "string"
+                    and string.lower(item.name) or ""
+                local kindOk = type(item) == "table" and (
+                    (wantSeed and item.kind == "seed")
+                    or (not wantSeed and item.kind ~= "seed" and numericId and isPlaceable(numericId))
+                )
+                if numericId and itemNameLower == wanted and kindOk and invCount(numericId) > 0
+                    and (not found or numericId < found) then
+                    found = numericId
+                end
+            end
+            return found
+        end
+
+        if FeatureConfig.AutoFarm == true then
+            local id = resolveStartupItem(FeatureConfig.FarmBlock, false)
+            if id then
+                State.SelectedId = id
+            else
+                FeatureConfig.AutoFarm = false
+                warn("[Kzoyz x Opus] AutoFarm dimatikan: FarmBlock tidak ditemukan sebagai block di inventori.")
+            end
+        end
+        if FeatureConfig.Farmer == true then
+            local id = resolveStartupItem(FeatureConfig.FarmSeed, true)
+            if id then
+                Farmer.SeedId = id
+                Farmer.Plant = true
+                Farmer.Harvest = true
+            else
+                FeatureConfig.Farmer = false
+                warn("[Kzoyz x Opus] Farmer dimatikan: FarmSeed tidak ditemukan sebagai seed di inventori.")
+            end
+        end
+        pcall(doInvRefresh, true)
+
+        local toggles = {
+            { "AutoFarm", UI.FarmToggle },
+            { "AutoClear", UI.ClearToggle },
+            { "Farmer", UI.FarmerToggle },
+            { "AutoSplice", UI.SpliceToggle },
+            { "BuildLand", UI.BuildToggle },
+            { "Vending", UI.VendToggle },
+            { "Factory", UI.PabrikToggle },
+            { "AutoChat", UI.SpamToggle },
+            { "Guard", UI.GuardToggle },
+            { "AutoClaimQuest", UI.QuestToggle },
+            { "AutoRedeemCode", UI.RedeemToggle },
+        }
+        for _, entry in ipairs(toggles) do
+            if FeatureConfig[entry[1]] == true and entry[2] then
+                local ok, err = pcall(function() entry[2]:Set(true) end)
+                if not ok then
+                    warn("[Kzoyz x Opus] Gagal menyalakan " .. entry[1] .. ": " .. tostring(err))
+                end
+                task.wait(0.15)
+            end
+        end
+    end
     -- habis rejoin server: lanjutkan aktivitas sebelumnya
     Rejoin.startup(reconnect)
 end)
@@ -11677,4 +11748,3 @@ Session.Cleanup = function()
     pcall(function() FlyPad:Destroy() end)
     pcall(function() Window:Destroy() end)
 end
-
