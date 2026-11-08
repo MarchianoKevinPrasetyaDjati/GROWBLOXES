@@ -6,7 +6,9 @@ G.__KzoyzFeatureConfig = {
 	-- Isi nama sesuai nama item yang tampil di inventori game.
 	FarmBlock = "Sugar Cane",
 	FarmSeed = "Sugar Cane",
+	PlatformItem = "Wooden Platform",
 	AutoFarm = false,
+	AutoPlatform = false,
 	AutoClear = false,
 	Farmer = false,
 	AutoSplice = false,

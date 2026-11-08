@@ -144,6 +144,19 @@ local Land = {
     Stairs = true,    -- ujung baris dibuka bergantian kiri/kanan (jalan naik-turun seperti tangga)
 }
 
+-- Auto Platform: gunakan geometri lahan yang sama, tetapi hanya pasang item platform.
+local Platform = {
+    Running = false,
+    ItemId = nil,
+    Status = "Berhenti",
+    Placed = 0,
+    Total = 0,
+    Done = 0,
+    Blocked = 0,
+    Row = 0,
+    RunId = 0,
+}
+
 -- Bangun Lahan
 local Build = {
     Running = false,
@@ -571,7 +584,13 @@ I18N.EN = {
     ["Jeda tanam / splice (ms)"] = "Plant / splice delay (ms)",
     -- Lahan
     ["Status Lahan"] = "Land Status",
-    ["Bangun Lahan"] = "Build Land",
+    ["Bangun Lahan"] = "Build Land", ["Auto Platform"] = "Auto Platform",
+    ["Status Auto Platform"] = "Auto Platform Status",
+    ["Bangun platform otomatis"] = "Build platforms automatically",
+    ["Pakai bentuk X/Y/jarak/baris dari Bentuk Lahan; jalur tangga zig-zag"] =
+        "Use the Land X/Y/spacing/row settings; use a zig-zag access path",
+    ["Item platform"] = "Platform item",
+    ["Pilih item bertipe platform dari inventori"] = "Choose a platform item from inventory",
     ["Hitung block, produksi kalau kurang, lalu pasang dari baris bawah"] = "Count blocks, produce if short, then place from the bottom row",
     ["Block lahan"] = "Land block",
     ["Block padat dari inventori"] = "Solid block from inventory",
@@ -1164,6 +1183,7 @@ Config.add("Misc", Misc, { "Speed" })
 Config.add("Chat", Spam, { "Texts", "IntervalSec" })
 Config.add("Lahan", Land, { "X0", "X1", "Y0" })
 Config.add("Bangun", Build, { "BlockId", "ThenPabrik", "BreakX", "BreakY", "Tiles" })
+Config.add("Platform", Platform, { "ItemId" })
 Config.add("Vending", Vend, { "Mode", "Point", "Items", "DropX", "DropY" })
 Config.add("Pabrik", Pabrik, {
     "SeedId", "WholeWorld", "Tiles", "BreakX", "BreakY",
@@ -1491,6 +1511,7 @@ local invRefreshPending = false
 
 local lastSeedSig = nil
 local lastBlockSig = nil
+local lastPlatformSig = nil
 
 -- Seed di inventori (untuk Farmer)
 local function seedIds()
@@ -1541,6 +1562,21 @@ local function doInvRefresh(force)
         local labels = inventoryLabels(ids)
         UI.ddRefresh(UI.InvDropdown, labels)
         selectSaved(UI.InvDropdown, labels, State.SelectedId)
+    end
+    local pids, pLabels = {}, {}
+    for _, id in ipairs(ids) do
+        local it = ItemDB[id]
+        if it and it.platform then
+            pids[#pids + 1] = id
+            pLabels[#pLabels + 1] = string.format("%s [%d]", itemName(id), id)
+        end
+    end
+    local psig = table.concat(pids, ",")
+    if force or psig ~= lastPlatformSig then
+        lastPlatformSig = psig
+        if #pLabels == 0 then pLabels = { "(tidak ada platform di inventori)" } end
+        UI.ddRefresh(UI.PlatformDropdown, pLabels)
+        selectSaved(UI.PlatformDropdown, pLabels, Platform.ItemId)
     end
     local sids = seedIds()
     local ssig = table.concat(sids, ",")
@@ -2665,7 +2701,8 @@ local BreakTimes = {}        -- tile yang terus balik lagi setelah pecah
 local Reach = nil            -- daftar tile yang bisa dijangkau (cache)
 
 local function autoOn()
-    return (Clear.Running or Farmer.Running or Splice.Roaming or Pabrik.Running or Build.Running or Move.Homing
+    return (Clear.Running or Farmer.Running or Splice.Roaming or Pabrik.Running or Build.Running
+        or Platform.Running or Move.Homing
         or Vend.Running) and alive()
 end
 
@@ -2678,6 +2715,8 @@ local function setMoveStatus(text)
         Splice.Status = text
     elseif Build.Running then
         Build.Status = text
+    elseif Platform.Running then
+        Platform.Status = text
     elseif Pabrik.Running then
         Pabrik.Status = text
     elseif Vend.Running then
@@ -3881,7 +3920,8 @@ local function autoBegin()
 end
 
 local function autoEnd()
-    if Clear.Running or Farmer.Running or Splice.Roaming or Pabrik.Running or Build.Running or Move.Homing
+    if Clear.Running or Farmer.Running or Splice.Roaming or Pabrik.Running or Build.Running
+        or Platform.Running or Move.Homing
         or Vend.Running then
         return
     end
@@ -7596,6 +7636,183 @@ Auto.findTreeRefs = findTreeRefs
 Auto.releaseInput = releaseInput
 Auto.BadEdge = BadEdge
 Auto.ClearFail = ClearFail
+
+-- ---------- Auto Platform ----------
+-- Pakai baris dan tangga zig-zag yang sama dengan geometri lahan, tanpa menggali tanah.
+local function platformPlan()
+    local w = Refs.World
+    if not w then return nil, "Data world belum ketemu" end
+    local x0 = math.clamp(math.floor(math.min(Land.X0, Land.X1)), 0, w.w - 1)
+    local x1 = math.clamp(math.floor(math.max(Land.X0, Land.X1)), 0, w.w - 1)
+    local y0 = math.floor(Land.Y0)
+    local gap = math.max(2, math.floor(tonumber(Land.Gap) or 2))
+    local rowCount = math.clamp(math.floor(tonumber(Land.Rows) or 1), 1, 40)
+    if y0 < 0 or y0 >= w.h - 1 then return nil, "Y baris atas di luar world" end
+
+    local plan = { rows = {}, total = 0, done = 0, need = 0, blocked = 0, x0 = x0, x1 = x1, gap = gap }
+    for k = 1, rowCount do
+        local y = y0 + (k - 1) * gap
+        if y >= w.h - 1 then
+            return nil, ("Baris ke-%d melewati batas world; kurangi jumlah baris / jarak"):format(k)
+        end
+        local row = { y = y, targets = {} }
+        for _, x in ipairs(landCols(k - 1)) do
+            local t = { x = x, y = y, idx = y * w.w + x }
+            plan.total += 1
+            local fg = fgIdAt(x, y)
+            if fg == Platform.ItemId then
+                t.done = true
+                plan.done += 1
+            elseif fg ~= 0 or not placeOk(x, y) then
+                t.blocked = true
+                plan.blocked += 1
+            else
+                plan.need += 1
+            end
+            row.targets[#row.targets + 1] = t
+        end
+        plan.rows[#plan.rows + 1] = row
+    end
+    return plan
+end
+
+Auto.platformPlan = platformPlan
+
+function Platform.stop(reason)
+    if not Platform.Running then return end
+    Platform.Running = false
+    Platform.Status = reason or "Dihentikan"
+    releaseInput()
+    autoEnd()
+    if UI.PlatformToggle then pcall(function() UI.PlatformToggle:Set(false) end) end
+end
+
+local function platformLoop(runId)
+    local function live() return Platform.Running and alive() and Platform.RunId == runId end
+    local plan, why = platformPlan()
+    if not plan then Platform.stop(why or "Gagal menghitung platform") return end
+    Platform.Total, Platform.Done, Platform.Blocked = plan.total, plan.done, plan.blocked
+    if plan.blocked > 0 then
+        Platform.stop(("Berhenti: %d tile terhalang / tidak bisa dibangun; kosongkan area dulu"):format(plan.blocked))
+        return
+    end
+    Platform.Status = ("Rencana %d platform; butuh %d, punya %d"):format(
+        plan.total, plan.need, invCount(Platform.ItemId))
+
+    -- Bangun dari baris terbawah ke atas agar jalur pijakan sudah tersedia.
+    for k = #plan.rows, 1, -1 do
+        if not live() then break end
+        Platform.Row = k
+        local pending = {}
+        for _, t in ipairs(plan.rows[k].targets) do
+            if not t.done then pending[#pending + 1] = t end
+        end
+        while #pending > 0 and live() do
+            if invCount(Platform.ItemId) <= 0 then
+                Platform.stop(("Platform habis: terpasang %d / %d"):format(Platform.Done, Platform.Total))
+                return
+            end
+            local s = playerState()
+            if not s or s.dead then
+                task.wait(0.25)
+                continue
+            end
+            local sx, sy = startNode(s)
+            local group = {}
+            for _, t in ipairs(pending) do group[#group + 1] = t end
+            if not travelGroup(sx, sy, group, math.max(0.5, buildReach() - 0.1), false, {}, {}) then
+                Platform.stop(("Berhenti: tidak ada jalur ke baris %d"):format(k))
+                return
+            end
+
+            s = playerState()
+            local placedAny = false
+            for i = #pending, 1, -1 do
+                local t = pending[i]
+                local fg = fgIdAt(t.x, t.y)
+                if fg == Platform.ItemId then
+                    Platform.Done += 1
+                    table.remove(pending, i)
+                elseif fg ~= 0 or not placeOk(t.x, t.y) then
+                    Platform.Blocked += 1
+                    Platform.stop(("Berhenti: tile (%d,%d) terhalang"):format(t.x, t.y))
+                    return
+                elseif s and stateReaches(s, t.x, t.y, buildReach() - 0.1)
+                    and not overlapsPlayer(t.x, t.y, s) then
+                    sendSetTile("fg", t.x, t.y, Platform.ItemId)
+                    pcall(function() Refs.Inv:remove(Platform.ItemId, 1) end)
+                    Platform.Placed += 1
+                    Platform.Done += 1
+                    placedAny = true
+                    table.remove(pending, i)
+                    Platform.Status = ("Baris %d | terpasang %d / %d"):format(k, Platform.Done, Platform.Total)
+                    if not waitAuto(math.max(140, State.PlaceMs)) then return end
+                    s = playerState()
+                end
+            end
+            if not placedAny and #pending > 0 then
+                Platform.stop(("Berhenti: tile baris %d tidak terjangkau dari posisi aman"):format(k))
+                return
+            end
+        end
+    end
+    if live() then Platform.stop(("Selesai: %d / %d platform"):format(Platform.Done, Platform.Total)) end
+end
+
+function Platform.start()
+    if Platform.Running then return end
+    local it = Platform.ItemId and ItemDB[Platform.ItemId]
+    local err
+    if not Refs.World then
+        err = "Data world belum ketemu. Tekan 'Hubungkan ke game'"
+    elseif not OrigIsDown then
+        err = "Kontrol gerak game belum ketemu"
+    elseif not playerState() then
+        err = "Kamu belum masuk world"
+    elseif not (it and it.platform) then
+        err = "Pilih item platform dari inventori"
+    elseif invCount(Platform.ItemId) <= 0 then
+        err = "Platform pilihan habis"
+    end
+    local plan, planErr = platformPlan()
+    if not err and not plan then err = planErr end
+    if not err and plan.blocked > 0 then
+        err = ("Ada %d tile terhalang; kosongkan area platform dulu"):format(plan.blocked)
+    end
+    if err then
+        Platform.Status = err
+        notify("Auto Platform", err, 5)
+        if UI.PlatformToggle then pcall(function() UI.PlatformToggle:Set(false) end) end
+        return
+    end
+
+    Auto.stopWalk()
+    if Pabrik.Running then Pabrik.stop() end
+    if Build.Running then Build.stop() end
+    if State.Running then stopFarm("Dihentikan karena Auto Platform dimulai") end
+    if Clear.Running then stopClear("Dihentikan karena Auto Platform dimulai") end
+    if Farmer.Running then stopFarmer("Dihentikan karena Auto Platform dimulai") end
+    if Splice.Running and Splice.stop then Splice.stop("Dihentikan karena Auto Platform dimulai") end
+    if Vend.Running then Vend.stop() end
+    Platform.Running = true
+    Platform.RunId += 1
+    Platform.Placed, Platform.Done, Platform.Blocked = 0, plan.done, 0
+    Platform.Total, Platform.Row = plan.total, 0
+    Platform.Status = ("Mulai: butuh %d %s, punya %d"):format(plan.need, itemName(Platform.ItemId), invCount(Platform.ItemId))
+    autoBegin()
+    if UI.PlatformToggle then pcall(function() UI.PlatformToggle:Set(true) end) end
+    local runId = Platform.RunId
+    task.spawn(function()
+        local ok, e = pcall(platformLoop, runId)
+        if not ok then
+            warn("[Kzoyz x Opus] Auto Platform error: " .. tostring(e))
+            if Platform.Running then Platform.stop("Error: " .. tostring(e)) end
+        end
+    end)
+end
+
+Auto.startPlatform = Platform.start
+Auto.stopPlatform = Platform.stop
 Auto.resetReach = function() Reach = nil end
 end)() end -- do (gerak otomatis)
 
@@ -8801,7 +9018,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
 
     local function anyRunning()
         return State.Running or Clear.Running or Farmer.Running or Splice.Running or Spam.On
-            or Pabrik.Running or Build.Running
+            or Pabrik.Running or Build.Running or Platform.Running
     end
 
     -- Catat aktivitas yang sedang jalan (untuk dilanjutkan nanti)
@@ -8810,6 +9027,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
         return {
             farm = State.Running and not State.Override, clear = Clear.Running, farmer = Farmer.Running,
             spam = Spam.On, splice = Splice.Running, pabrik = Pabrik.Running, build = Build.Running,
+            platform = Platform.Running,
             world = worldName(), tx = tx, ty = ty,
         }
     end
@@ -8818,6 +9036,7 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
         Auto.stopWalk()
         if Pabrik.Running then Pabrik.stop() end
         if Build.Running then Build.stop() end
+        if Platform.Running then Platform.stop() end
         if State.Running then stopFarm() end
         if Clear.Running then
             stopClear()
@@ -8887,7 +9106,9 @@ do (function() -- fungsi sendiri: variabel di dalam tidak ikut batas 200 local
             if UI.SpamToggle then pcall(function() UI.SpamToggle:Set(true) end) end
             Spam.On = true
         end
-        if saved.build then
+        if saved.platform then
+            if stillBack(token) then Platform.start() end
+        elseif saved.build then
             if stillBack(token) then Build.start() end
         elseif saved.pabrik then
             if stillBack(token) then Pabrik.start() end
@@ -10418,6 +10639,67 @@ do (function()
 
     local lCtl = box(LTab, "Bangun Lahan", true)
     local lShape = box(LTab, "Bentuk lahan", true)
+    local pCtl = box(LTab, "Auto Platform", true)
+
+    safe(function()
+        UI.PlatformStatus = LTab:Paragraph({ Title = "Status Auto Platform", Desc = "Belum dihitung" })
+    end)
+
+    safe(function()
+        UI.PlatformToggle = pCtl:Toggle({
+            Title = "Bangun platform otomatis",
+            Desc = "Pakai bentuk X/Y/jarak/baris dari Bentuk Lahan; jalur tangga zig-zag",
+            Value = false,
+            Callback = function(on)
+                if on then Platform.start() elseif Platform.Running then Platform.stop() end
+            end,
+        })
+    end)
+
+    safe(function()
+        UI.PlatformDropdown = pCtl:Dropdown({
+            Title = "Item platform",
+            Desc = "Pilih item bertipe platform dari inventori",
+            Values = { "(memuat...)" },
+            Callback = function(opt)
+                local id = tonumber(string.match(opt or "", "%[(%d+)%]$"))
+                local item = id and ItemDB[id]
+                if item and item.platform then Platform.ItemId = id end
+            end,
+        })
+    end)
+
+    task.spawn(function()
+        local lastCalc = 0
+        local cachedPlan, cachedError
+        while alive() do
+            if os.clock() - lastCalc >= 5 then
+                cachedPlan, cachedError = Auto.platformPlan()
+                lastCalc = os.clock()
+            end
+            local txt
+            if not Refs.World then
+                txt = "Masuk world lalu tekan Hubungkan ke game."
+            elseif cachedPlan then
+                txt = table.concat({
+                    "Status: " .. (Platform.Running and "JALAN" or "BERHENTI") .. " — " .. Platform.Status,
+                    ("Item: %s | punya %d"):format(Platform.ItemId and itemName(Platform.ItemId) or "-",
+                        Platform.ItemId and invCount(Platform.ItemId) or 0),
+                    ("Rencana: %d tile | sudah ada: %d | perlu: %d | terhalang: %d"):format(
+                        cachedPlan.total, cachedPlan.done, cachedPlan.need, cachedPlan.blocked),
+                    ("Bentuk: X %d-%d | Y mulai %d | %d baris | jarak %d"):format(
+                        cachedPlan.x0, cachedPlan.x1, math.floor(Land.Y0), #cachedPlan.rows, cachedPlan.gap),
+                }, "\n")
+            else
+                txt = "Rencana belum tersedia: " .. tostring(cachedError or "cek ukuran world / batas lahan")
+            end
+            if UI.PlatformStatus and txt ~= Platform.Shown then
+                Platform.Shown = txt
+                pcall(function() UI.PlatformStatus:SetDesc(txt) end)
+            end
+            task.wait(1)
+        end
+    end)
 
     safe(function()
         UI.BuildToggle = lCtl:Toggle({
@@ -11159,6 +11441,7 @@ do (function()
             local data = {
                 world = saved.world, farm = saved.farm, clear = saved.clear, farmer = saved.farmer,
                 spam = saved.spam, splice = saved.splice, pabrik = saved.pabrik, build = saved.build,
+                platform = saved.platform,
                 tx = saved.tx, ty = saved.ty, at = os.time(),
             }
             pcall(function() writefile(PENDING, HttpService:JSONEncode(data)) end)
@@ -11615,7 +11898,7 @@ task.spawn(function()
     -- Aktifkan hanya fitur yang disetel true oleh loader.
     -- Aktivitas utama saling menghentikan; nyalakan maksimal satu aktivitas utama.
     if FeatureConfig and alive() then
-        local function resolveStartupItem(name, wantSeed)
+        local function resolveStartupItem(name, itemKind)
             if type(name) ~= "string" then return nil end
             local wanted = string.lower((name:gsub("^%s+", ""):gsub("%s+$", "")))
             if wanted == "" then return nil end
@@ -11625,8 +11908,9 @@ task.spawn(function()
                 local itemNameLower = type(item) == "table" and type(item.name) == "string"
                     and string.lower(item.name) or ""
                 local kindOk = type(item) == "table" and (
-                    (wantSeed and item.kind == "seed")
-                    or (not wantSeed and item.kind ~= "seed" and numericId and isPlaceable(numericId))
+                    (itemKind == "seed" and item.kind == "seed")
+                    or (itemKind == "platform" and item.platform)
+                    or (itemKind == "block" and item.kind ~= "seed" and numericId and isPlaceable(numericId))
                 )
                 if numericId and itemNameLower == wanted and kindOk and invCount(numericId) > 0
                     and (not found or numericId < found) then
@@ -11637,7 +11921,7 @@ task.spawn(function()
         end
 
         if FeatureConfig.AutoFarm == true then
-            local id = resolveStartupItem(FeatureConfig.FarmBlock, false)
+            local id = resolveStartupItem(FeatureConfig.FarmBlock, "block")
             if id then
                 State.SelectedId = id
             else
@@ -11646,7 +11930,7 @@ task.spawn(function()
             end
         end
         if FeatureConfig.Farmer == true then
-            local id = resolveStartupItem(FeatureConfig.FarmSeed, true)
+            local id = resolveStartupItem(FeatureConfig.FarmSeed, "seed")
             if id then
                 Farmer.SeedId = id
                 Farmer.Plant = true
@@ -11656,10 +11940,20 @@ task.spawn(function()
                 warn("[Kzoyz x Opus] Farmer dimatikan: FarmSeed tidak ditemukan sebagai seed di inventori.")
             end
         end
+        if FeatureConfig.AutoPlatform == true then
+            local id = resolveStartupItem(FeatureConfig.PlatformItem or "Wooden Platform", "platform")
+            if id then
+                Platform.ItemId = id
+            else
+                FeatureConfig.AutoPlatform = false
+                warn("[Kzoyz x Opus] AutoPlatform dimatikan: PlatformItem tidak ditemukan sebagai platform di inventori.")
+            end
+        end
         pcall(doInvRefresh, true)
 
         local toggles = {
             { "AutoFarm", UI.FarmToggle },
+            { "AutoPlatform", UI.PlatformToggle },
             { "AutoClear", UI.ClearToggle },
             { "Farmer", UI.FarmerToggle },
             { "AutoSplice", UI.SpliceToggle },
@@ -11726,6 +12020,7 @@ Session.Cleanup = function()
     Rejoin.On = false
     Pabrik.Running = false
     Build.Running = false
+    Platform.Running = false
     State.Override = nil
     pcall(Auto.stopWalk)
     AutoInput.active = false
