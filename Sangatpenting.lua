@@ -8222,6 +8222,117 @@ local function newScreenGui(name)
     return sg
 end
 
+-- Kartu sambutan/status yang langsung muncul setelah script dimuat.
+local HomeGui = newScreenGui("KevInGrowHome")
+HomeGui.DisplayOrder = 1001
+HomeGui.Enabled = true
+UI.HomeGui = HomeGui
+
+local HomeCard = Instance.new("Frame")
+HomeCard.Name = "StatusCard"
+HomeCard.AnchorPoint = Vector2.new(0.5, 0)
+HomeCard.Size = UDim2.new(0.9, 0, 0, 174)
+HomeCard.Position = UDim2.new(0.5, 0, 0, 72)
+HomeCard.BackgroundColor3 = Color3.fromRGB(19, 23, 31)
+HomeCard.BorderSizePixel = 0
+HomeCard.Parent = HomeGui
+Instance.new("UICorner", HomeCard).CornerRadius = UDim.new(0, 12)
+local HomeSize = Instance.new("UISizeConstraint")
+HomeSize.MinSize = Vector2.new(280, 174)
+HomeSize.MaxSize = Vector2.new(360, 174)
+HomeSize.Parent = HomeCard
+local HomeStroke = Instance.new("UIStroke", HomeCard)
+HomeStroke.Color = Color3.fromRGB(79, 202, 151)
+HomeStroke.Thickness = 1.4
+
+local HomeTitle = Instance.new("TextLabel")
+HomeTitle.Size = UDim2.new(1, -52, 0, 35)
+HomeTitle.Position = UDim2.fromOffset(16, 8)
+HomeTitle.BackgroundTransparency = 1
+HomeTitle.Font = Enum.Font.GothamBold
+HomeTitle.Text = "KEVINGROW.dev"
+HomeTitle.TextSize = 20
+HomeTitle.TextXAlignment = Enum.TextXAlignment.Left
+HomeTitle.TextColor3 = Color3.fromRGB(110, 235, 180)
+HomeTitle.Parent = HomeCard
+
+local HomeClose = Instance.new("TextButton")
+HomeClose.Size = UDim2.fromOffset(28, 28)
+HomeClose.Position = UDim2.new(1, -36, 0, 8)
+HomeClose.BackgroundColor3 = Color3.fromRGB(42, 49, 60)
+HomeClose.BorderSizePixel = 0
+HomeClose.Font = Enum.Font.GothamBold
+HomeClose.Text = "×"
+HomeClose.TextSize = 20
+HomeClose.TextColor3 = Color3.fromRGB(235, 240, 245)
+HomeClose.Parent = HomeCard
+Instance.new("UICorner", HomeClose).CornerRadius = UDim.new(0, 7)
+
+local HomeInfo = Instance.new("TextLabel")
+HomeInfo.Size = UDim2.new(1, -30, 0, 106)
+HomeInfo.Position = UDim2.fromOffset(16, 50)
+HomeInfo.BackgroundTransparency = 1
+HomeInfo.Font = Enum.Font.Gotham
+HomeInfo.Text = "Waktu: memuat...\nNama player: memuat...\nAktivitas: memuat..."
+HomeInfo.TextSize = 13
+HomeInfo.TextWrapped = true
+HomeInfo.TextXAlignment = Enum.TextXAlignment.Left
+HomeInfo.TextYAlignment = Enum.TextYAlignment.Top
+HomeInfo.TextColor3 = Color3.fromRGB(224, 230, 238)
+HomeInfo.Parent = HomeCard
+
+local HomeReopen = Instance.new("TextButton")
+HomeReopen.Size = UDim2.fromOffset(42, 42)
+HomeReopen.Position = UDim2.fromOffset(18, 150)
+HomeReopen.BackgroundColor3 = Color3.fromRGB(19, 23, 31)
+HomeReopen.BorderSizePixel = 0
+HomeReopen.Font = Enum.Font.GothamBold
+HomeReopen.Text = "K"
+HomeReopen.TextSize = 19
+HomeReopen.TextColor3 = Color3.fromRGB(110, 235, 180)
+HomeReopen.Visible = false
+HomeReopen.Parent = HomeGui
+Instance.new("UICorner", HomeReopen).CornerRadius = UDim.new(1, 0)
+local ReopenStroke = Instance.new("UIStroke", HomeReopen)
+ReopenStroke.Color = Color3.fromRGB(79, 202, 151)
+
+HomeClose.MouseButton1Click:Connect(function()
+    HomeCard.Visible = false
+    HomeReopen.Visible = true
+end)
+HomeReopen.MouseButton1Click:Connect(function()
+    HomeCard.Visible = true
+    HomeReopen.Visible = false
+end)
+
+local function currentActivity()
+    local name, detail
+    if Platform.Running then name, detail = "Auto Platform", Platform.Status
+    elseif Build.Running then name, detail = "Bangun Lahan", Build.Status
+    elseif Pabrik.Running then name, detail = "Pabrik", Pabrik.Status
+    elseif Farmer.Running then name, detail = "Farmer", Farmer.Status
+    elseif Clear.Running then name, detail = "Clear World", Clear.Status
+    elseif Splice.Running then name, detail = "Auto Splice", Splice.Status
+    elseif State.Running then name, detail = "Auto Farm", State.LastAction
+    elseif Vend.Running then name, detail = "Vending", Vend.Status
+    elseif Move.Homing then name, detail = "Auto Walk", "Berjalan ke target"
+    elseif Spam.On then name, detail = "Auto Chat", "Mengirim pesan sesuai pengaturan"
+    elseif Guard.On then name, detail = "Penjaga", Guard.Mode
+    else return "Idle — menunggu aktivitas" end
+    detail = tostring(detail or "Berjalan")
+    if #detail > 64 then detail = string.sub(detail, 1, 61) .. "..." end
+    return name .. " — " .. detail
+end
+
+task.spawn(function()
+    while alive() and HomeGui.Parent do
+        local displayName = LocalPlayer.DisplayName or LocalPlayer.Name
+        HomeInfo.Text = ("Waktu: %s\nNama player: %s (@%s)\nAktivitas: %s"):format(
+            os.date("%d/%m/%Y %H:%M:%S"), displayName, LocalPlayer.Name, currentActivity())
+        task.wait(1)
+    end
+end)
+
 local GRID_RADIUS = 2
 local CELL = 38
 local GAP = 4
@@ -12194,5 +12305,6 @@ Session.Cleanup = function()
     end
     pcall(function() GridGui:Destroy() end)
     pcall(function() FlyPad:Destroy() end)
+    pcall(function() HomeGui:Destroy() end)
     pcall(function() Window:Destroy() end)
 end
